@@ -11,5 +11,5 @@ import java.util.List;
 @ConfigurationProperties(prefix = "redis.stream")
 public class RedissonStreamConfig {
     @Getter
-    private final List<RedissonStreamConfigProperty> groups = new ArrayList<>();
+    private final List<RedissonStreamProperty> groups = new ArrayList<>();
 }

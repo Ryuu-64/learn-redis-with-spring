@@ -22,7 +22,7 @@
         </encoder>
     </appender>
 
-    <logger name="com.example.demo.consumer.RedisStreamConsumer" level="DEBUG"/>
+    <logger name="com.example.demo.consumer.Consumer1Service" level="DEBUG"/>
     <!--    <logger name="org.springframework" level="DEBUG"/>-->
     <!--    <logger name="org.springframework.data.redis" level="DEBUG"/>-->
 </configuration>
