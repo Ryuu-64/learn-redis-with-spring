@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: learn-redis-with-spring
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+
+redis:
+  stream:
+    groups:
+      - stream: learn_redis:redisson:stream:1
+        group: "redisson-group-1"
+        consumer: "consumer"
+      - stream: learn_redis:redisson:stream:2
+        group: "redisson-group-2"
+        consumer: "consumer"
+      - stream: learn_redis:redisson:stream:3
+        group: "redisson-group-3"
+        consumer: "consumer"
+      - stream: learn_redis:redisson:stream:4
+        group: "redisson-group-4"
+        consumer: "consumer"
+      - stream: learn_redis:redisson:stream:1
+        group: "redisson-group-5"
+        consumer: "consumer"
+      - stream: learn_redis:redisson:stream:1
+        group: "redisson-group-6"
+        consumer: "consumer"

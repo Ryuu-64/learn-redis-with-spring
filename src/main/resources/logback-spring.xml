@@ -12,9 +12,9 @@
     </appender>
 
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>logs/redis-stream.log</file>
+        <file>logs/learn-redis-with-spring.log</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            <fileNamePattern>logs/redis-stream-%d{yyyy-MM-dd}.log</fileNamePattern>
+            <fileNamePattern>logs/learn-redis-with-spring-%d{yyyy-MM-dd}.log</fileNamePattern>
             <maxHistory>7</maxHistory>
         </rollingPolicy>
         <encoder>
