@@ -3,6 +3,7 @@ package com.example.demo.consumer;
 import com.example.demo.config.RedissonStreamProperty;
 import org.redisson.api.StreamMessageId;
 import org.ryuu.functional.Action2Args;
+import org.ryuu.functional.Func2Args;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -23,8 +24,9 @@ public class Consumer1Service {
         property.setGroup("redisson-group-6");
         property.setConsumer("consumer");
 
-        Action2Args<StreamMessageId, Map<String, String>> handler = (key, value) -> {
+        Func2Args<StreamMessageId, Map<String, String>, Boolean> handler = (key, value) -> {
             LOGGER.debug("property={}, key={}, value={}", property, key, value);
+            return true;
         };
 
         service.addHandler(property, handler);

@@ -4,7 +4,7 @@ import com.example.demo.config.RedissonStreamConfig;
 import com.example.demo.config.RedissonStreamProperty;
 import org.redisson.api.*;
 import org.redisson.client.codec.StringCodec;
-import org.ryuu.functional.Action2Args;
+import org.ryuu.functional.Func2Args;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import jakarta.annotation.PreDestroy;
@@ -24,8 +24,8 @@ public class AsyncRedissonStreamConsumerService {
 
     private final RedissonClient redisson;
     private final Map<RedissonStreamProperty, CompletableFuture<?>> consumerTasks = new ConcurrentHashMap<>();
-    private volatile boolean running = true;
-    private final Map<RedissonStreamProperty, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = new ConcurrentHashMap<>();
+    private volatile boolean isRunning = true;
+    private final Map<RedissonStreamProperty, Func2Args<StreamMessageId, Map<String, String>, Boolean>> handlerMap = new ConcurrentHashMap<>();
 
     protected AsyncRedissonStreamConsumerService(
             RedissonClient redisson,
@@ -37,37 +37,35 @@ public class AsyncRedissonStreamConsumerService {
         groups.forEach(this::startConsuming);
     }
 
-    public void addHandler(RedissonStreamProperty property, Action2Args<StreamMessageId, Map<String, String>> handler) {
+    public void addHandler(RedissonStreamProperty property, Func2Args<StreamMessageId, Map<String, String>, Boolean> handler) {
         handlerMap.put(property, handler);
     }
 
-    /** 尝试创建消费组 */
     private void tryCreateGroup(RedissonStreamProperty property) {
         RStream<String, String> stream = redisson.getStream(property.getStream(), StringCodec.INSTANCE);
         try {
             Collection<StreamGroup> groups = stream.listGroups();
-            boolean isGroupExists = groups.stream()
+            boolean groupExists = groups.stream()
                     .anyMatch(g -> g.getName().equals(property.getGroup()));
-            if (!isGroupExists) {
+
+            if (!groupExists) {
                 stream.createGroup(property.getGroup(), StreamMessageId.NEWEST);
                 LOGGER.info("Created group [{}] for stream [{}]", property.getGroup(), property.getStream());
             } else {
                 LOGGER.info("Stream group [{}] already exists", property.getGroup());
             }
         } catch (Exception e) {
-            LOGGER.error("Failed to check or create stream group", e);
+            LOGGER.error("Failed to check or create stream group [{}]", property.getGroup(), e);
         }
     }
 
-    /** 启动消费 */
     private void startConsuming(RedissonStreamProperty property) {
         CompletableFuture<?> task = CompletableFuture.runAsync(() -> consumeLoop(property));
         consumerTasks.put(property, task);
     }
 
-    /** 消费循环 */
     private void consumeLoop(RedissonStreamProperty property) {
-        if (!running) {
+        if (!isRunning) {
             return;
         }
 
@@ -94,8 +92,7 @@ public class AsyncRedissonStreamConsumerService {
             } catch (Exception e) {
                 LOGGER.error("Error processing messages for group {}", property.getGroup(), e);
             } finally {
-                // 使用 scheduledExecutor 调度下一次消费，避免递归
-                if (running) {
+                if (isRunning) {
                     scheduleNextConsume(property);
                 }
             }
@@ -107,13 +104,17 @@ public class AsyncRedissonStreamConsumerService {
     ) {
         for (Map.Entry<StreamMessageId, Map<String, String>> entry : messages.entrySet()) {
             try {
-                handleMessage(property, entry);
-                stream.ackAsync(property.getGroup(), entry.getKey())
-                        .exceptionally(ex -> {
-                            LOGGER.error("Failed to acknowledge message {} for group {}",
-                                    entry.getKey(), property.getGroup(), ex);
-                            return null;
-                        });
+                boolean shouldAck = handleMessage(property, entry);
+                if (shouldAck) {
+                    stream.ackAsync(property.getGroup(), entry.getKey())
+                            .exceptionally(throwable -> {
+                                LOGGER.error(
+                                        "Failed to acknowledge message {} for group {}",
+                                        entry.getKey(), property.getGroup(), throwable
+                                );
+                                return null;
+                            });
+                }
             } catch (Exception e) {
                 LOGGER.error("Failed to process message {} for group {}",
                         entry.getKey(), property.getGroup(), e);
@@ -121,15 +122,14 @@ public class AsyncRedissonStreamConsumerService {
         }
     }
 
-    private void handleMessage(RedissonStreamProperty property, Map.Entry<StreamMessageId, Map<String, String>> entry) {
-        Action2Args<StreamMessageId, Map<String, String>> handler = handlerMap.getOrDefault(property, null);
-        invokeIfNotNull(handler, entry.getKey(), entry.getValue());
+    private boolean handleMessage(RedissonStreamProperty property, Map.Entry<StreamMessageId, Map<String, String>> entry) {
+        Func2Args<StreamMessageId, Map<String, String>, Boolean> handler = handlerMap.getOrDefault(property, null);
+        return invokeIfNotNull(handler, entry.getKey(), entry.getValue());
     }
 
-    /** 处理错误 */
     private void handleError(RedissonStreamProperty property, Throwable ex) {
         LOGGER.error("Error in consumeLoop for group {}: {}", property.getGroup(), ex.getMessage(), ex);
-        if (running) {
+        if (isRunning) {
             CompletableFuture.delayedExecutor(ERROR_RETRY_DELAY_MS, TimeUnit.MILLISECONDS)
                     .execute(() -> consumeLoop(property));
         }
@@ -141,7 +141,7 @@ public class AsyncRedissonStreamConsumerService {
 
     @PreDestroy
     public void stop() {
-        running = false;
+        isRunning = false;
         CompletableFuture<Void> allTasks = CompletableFuture.allOf(
                 consumerTasks.values().toArray(new CompletableFuture[0])
         );
