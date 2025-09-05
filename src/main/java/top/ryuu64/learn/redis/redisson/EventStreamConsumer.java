@@ -15,7 +15,7 @@ import java.util.concurrent.*;
 public class EventStreamConsumer {
     private static final Logger LOGGER = LoggerFactory.getLogger(EventStreamConsumer.class);
     private static final String DEAD_LETTER_STREAM_SUFFIX = ":dead_letter";
-    public static final int BATCH_SIZE = 10;
+    public static final int READ_AND_PENDING_BATCH_SIZE = 10;
     public static final long READ_TIMEOUT_MS = 2000;
     public static final long ERROR_RETRY_DELAY_MS = 1000;
     public static final long PEL_IDLE_THRESHOLD_MS = 10_000;
@@ -35,7 +35,12 @@ public class EventStreamConsumer {
         Set<RedisStreamArgs> properties = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (RedisStreamArgs property : properties) {
-            CompletableFuture<Void> future = ensureGroupExists(property);
+            CompletableFuture<Void> future = ensureNormalGroupExists(property);
+            futures.add(future);
+        }
+
+        for (RedisStreamArgs property : properties) {
+            CompletableFuture<Void> future = ensureDeadGroupExists(property);
             futures.add(future);
         }
 
@@ -44,16 +49,27 @@ public class EventStreamConsumer {
         properties.forEach(this::startConsumerLoop);
     }
 
-    private CompletableFuture<Void> ensureGroupExists(RedisStreamArgs property) {
-        RStream<String, String> stream = redisson.getStream(property.getStreamKey(), StringCodec.INSTANCE);
+    private CompletableFuture<Void> ensureNormalGroupExists(RedisStreamArgs property) {
+        return ensureGroupExists(property, "");
+    }
+
+    private CompletableFuture<Void> ensureDeadGroupExists(RedisStreamArgs property) {
+        return ensureGroupExists(property, DEAD_LETTER_STREAM_SUFFIX);
+    }
+
+    private CompletableFuture<Void> ensureGroupExists(RedisStreamArgs property, String streamNameSuffix) {
+        String streamName = property.getStreamName() + streamNameSuffix;
+        RStream<String, String> stream = redisson.getStream(streamName, StringCodec.INSTANCE);
         try {
             if (!stream.isExists()) {
+                // 流不存在时，直接创建组也会创建流
                 return createGroupAsync(property, stream);
             }
 
-            boolean groupExists = stream.listGroups().stream()
+            boolean isGroupExists = stream.listGroups()
+                    .stream()
                     .anyMatch(g -> g.getName().equals(property.getGroupName()));
-            if (!groupExists) {
+            if (!isGroupExists) {
                 return createGroupAsync(property, stream);
             }
 
@@ -83,7 +99,7 @@ public class EventStreamConsumer {
             return;
         }
 
-        RStream<String, String> stream = redisson.getStream(property.getStreamKey(), StringCodec.INSTANCE);
+        RStream<String, String> stream = redisson.getStream(property.getStreamName(), StringCodec.INSTANCE);
         readMessages(stream, property);
         claimMessages(stream, property);
     }
@@ -91,8 +107,8 @@ public class EventStreamConsumer {
     private void readMessages(RStream<String, String> stream, RedisStreamArgs property) {
         stream.readGroupAsync(
                         property.getGroupName(),
-                        property.getConsumer(),
-                        BATCH_SIZE,
+                        property.getConsumerName(),
+                        READ_AND_PENDING_BATCH_SIZE,
                         READ_TIMEOUT_MS,
                         TimeUnit.MILLISECONDS,
                         StreamMessageId.NEVER_DELIVERED
@@ -134,7 +150,7 @@ public class EventStreamConsumer {
                 StreamMessageId.MAX,
                 PEL_IDLE_THRESHOLD_MS,
                 TimeUnit.MILLISECONDS,
-                BATCH_SIZE
+                READ_AND_PENDING_BATCH_SIZE
         ).whenComplete((pendingMessages, ex) -> {
             if (ex != null) {
                 LOGGER.error("Failed to fetch pending messages for group {}", property.getGroupName(), ex);
@@ -148,7 +164,7 @@ public class EventStreamConsumer {
             // claim 消息给当前 consumer
             StreamMessageId[] idsToClaim = pendingMessages.keySet().toArray(new StreamMessageId[0]);
             stream.claimAsync(
-                            property.getGroupName(), property.getConsumer(), PEL_IDLE_THRESHOLD_MS, TimeUnit.MILLISECONDS, idsToClaim
+                            property.getGroupName(), property.getConsumerName(), PEL_IDLE_THRESHOLD_MS, TimeUnit.MILLISECONDS, idsToClaim
                     )
                     .whenComplete((claimedMessages, claimEx) -> {
                         if (claimEx != null) {
@@ -157,12 +173,30 @@ public class EventStreamConsumer {
                         }
                         if (claimedMessages != null && !claimedMessages.isEmpty()) {
                             // 处理并 ack
-                            processAndAckMessages(property, stream, claimedMessages, true);
+                            Map<StreamMessageId, Map<String, String>> updatedMessages = new HashMap<>();
+                            for (Map.Entry<StreamMessageId, Map<String, String>> entry : claimedMessages.entrySet()) {
+                                StreamMessageId id = entry.getKey();
+                                Map<String, String> value = new HashMap<>(entry.getValue()); // 复制一份，避免修改原 Map
+                                String retryCount = value.get("retryCount");
+                                if (retryCount != null) {
+                                    int i = Integer.parseInt(retryCount) + 1;
+                                    value.put("retryCount", String.valueOf(i));
+                                } else {
+                                    value.put("retryCount", "1");
+                                }
+
+                                // 写回 Redis 覆盖原消息
+                                StreamAddArgs<String, String> args = StreamAddArgs.entries(value);
+                                stream.addAsync(args).toCompletableFuture().join();
+                                updatedMessages.put(id, value); // 保存更新后的 Map
+                            }
+
+                            // 处理并 ack
+                            processAndAckMessages(property, stream, updatedMessages, true);
                         }
                     });
         });
     }
-
 
     /** 处理消息并 ack； isRetry=true 表示 PEL 消息 */
     private void processAndAckMessages(
@@ -174,9 +208,10 @@ public class EventStreamConsumer {
         for (Map.Entry<StreamMessageId, Map<String, String>> entry : messages.entrySet()) {
             StreamMessageId msgId = entry.getKey();
             Map<String, String> body = entry.getValue();
-
             try {
-                int retryCount = body.getOrDefault("retryCount", "0").isEmpty() ? 0 : Integer.parseInt(body.getOrDefault("retryCount", "0"));
+                int retryCount = body.getOrDefault("retryCount", "0").isEmpty() ?
+                        0 :
+                        Integer.parseInt(body.getOrDefault("retryCount", "0"));
 
                 if (isRetry && retryCount >= MAX_RETRY_COUNT) {
                     // 超过最大重试次数 → 移到死信队列
@@ -200,12 +235,12 @@ public class EventStreamConsumer {
 
     /** 将消息移到死信队列 */
     private void moveToDeadLetter(RedisStreamArgs property, StreamMessageId msgId, Map<String, String> body) {
-        String deadLetterStream = property.getStreamKey() + DEAD_LETTER_STREAM_SUFFIX;
+        String deadLetterStream = property.getStreamName() + DEAD_LETTER_STREAM_SUFFIX;
         RStream<String, String> deadStream = redisson.getStream(deadLetterStream, StringCodec.INSTANCE);
 
         // 在消息体里记录原消息信息
         Map<String, String> deadMessage = new HashMap<>(body);
-        deadMessage.put("originalStream", property.getStreamKey());
+        deadMessage.put("originalStream", property.getStreamName());
         deadMessage.put("originalId", msgId.toString());
         StreamAddArgs<String, String> args = StreamAddArgs.entries(deadMessage);
         deadStream.addAsync(args)

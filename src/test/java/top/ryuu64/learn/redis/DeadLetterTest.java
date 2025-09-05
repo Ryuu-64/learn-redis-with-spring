@@ -37,15 +37,16 @@ class DeadLetterTest {
 
         // 1. 添加一条消息
         Map<String, String> body = new HashMap<>();
+        // field value
         body.put("foo", "bar");
         template.opsForStream().add(streamKey, body);
 
         // 2. 定义一个一定会失败的 handler
         Map<RedisStreamArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
                 RedisStreamArgs.builder()
-                        .streamKey(streamKey)
+                        .streamName(streamKey)
                         .groupName(group)
-                        .consumer(consumer)
+                        .consumerName(consumer)
                         .build(),
                 (msgId, msgBody) -> {
                     throw new RuntimeException("故意抛异常，模拟处理失败");
@@ -59,11 +60,17 @@ class DeadLetterTest {
 
         // 4. 检查死信队列
         RStream<String, String> deadStream = redisson.getStream(streamKey + ":dead_letter", StringCodec.INSTANCE);
-        // 读取死信队列最新 10 条消息
-        StreamReadArgs args = StreamReadArgs.greaterThan(StreamMessageId.ALL).count(10);
-        Map<StreamMessageId, Map<String, String>> messages = deadStream.readAsync(args)
-                .toCompletableFuture()
-                .join();
+        Map<StreamMessageId, Map<String, String>> messages = null;
+        long timeout = System.currentTimeMillis() + 10_000; // 最多等待 10 秒
+        while (System.currentTimeMillis() < timeout) {
+            // 读取死信队列最新 10 条消息
+            messages = deadStream.readAsync(StreamReadArgs.greaterThan(StreamMessageId.ALL).count(10))
+                    .toCompletableFuture().join();
+            if (messages != null && !messages.isEmpty()) {
+                break;
+            }
+            Thread.sleep(100); // 小间隔重试
+        }
         assertFalse(messages.isEmpty(), "死信队列应该有消息");
     }
 }

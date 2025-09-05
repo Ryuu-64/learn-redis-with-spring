@@ -24,21 +24,21 @@ public class Consumer1Service {
     private Map<RedisStreamArgs, Action2Args<StreamMessageId, Map<String, String>>> tryAddHandlers() {
         return Map.of(
                 RedisStreamArgs.builder()
-                        .streamKey("learn_redis:redisson:stream:1")
+                        .streamName("learn_redis:redisson:stream:1")
                         .groupName("redisson-group-1")
-                        .consumer("consumer")
+                        .consumerName("consumer")
                         .build(),
                 (key, value) -> LOGGER.debug("stream-1/group-1: key={}, value={}", key, value),
                 RedisStreamArgs.builder()
-                        .streamKey("learn_redis:redisson:stream:1")
+                        .streamName("learn_redis:redisson:stream:1")
                         .groupName("redisson-group-5")
-                        .consumer("consumer")
+                        .consumerName("consumer")
                         .build(),
                 (key, value) -> LOGGER.debug("stream-1/group-5: key={}, value={}", key, value),
                 RedisStreamArgs.builder()
-                        .streamKey("learn_redis:redisson:stream:1")
+                        .streamName("learn_redis:redisson:stream:1")
                         .groupName("redisson-group-6")
-                        .consumer("consumer")
+                        .consumerName("consumer")
                         .build(),
                 (key, value) -> LOGGER.debug("stream-1/group-6: key={}, value={}", key, value)
         );
