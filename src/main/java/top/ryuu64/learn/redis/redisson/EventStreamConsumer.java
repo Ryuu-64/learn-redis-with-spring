@@ -1,5 +1,6 @@
 package top.ryuu64.learn.redis.redisson;
 
+import lombok.Getter;
 import top.ryuu64.learn.redis.redisson.domain.RedisStreamArgs;
 import org.redisson.api.*;
 import org.redisson.api.stream.StreamAddArgs;
@@ -25,13 +26,23 @@ public class EventStreamConsumer {
     private final Map<RedisStreamArgs, CompletableFuture<?>> consumerTasks = new ConcurrentHashMap<>();
     private volatile boolean isRunning = true;
     private final Map<RedisStreamArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = new ConcurrentHashMap<>();
+    @Getter
+    private final CompletableFuture<Void> startFuture;
 
     public EventStreamConsumer(
             RedissonClient redisson, Map<RedisStreamArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap
     ) {
         this.redisson = redisson;
-
         this.handlerMap.putAll(handlerMap);
+        startFuture = CompletableFuture.runAsync(this::startAsync)
+                .whenCompleteAsync((result, throwable) -> {
+                    if (throwable != null) {
+                        LOGGER.error("Failed to start EventStreamConsumer", throwable);
+                    }
+                });
+    }
+
+    private void startAsync() {
         Set<RedisStreamArgs> properties = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (RedisStreamArgs property : properties) {
@@ -40,13 +51,14 @@ public class EventStreamConsumer {
             future = ensureGroupExistsAsync(property, DEAD_LETTER_STREAM_SUFFIX);
             futures.add(future);
         }
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        properties.forEach(this::startConsumerLoop);
-
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRun(() -> properties.forEach(this::startConsumerLoop));
     }
 
     private CompletableFuture<Void> ensureGroupExistsAsync(RedisStreamArgs property, String streamNameSuffix) {
-        String streamName = property.getStreamName() + streamNameSuffix;
+        RedisStreamArgs tempProperty = property.toBuilder().build();
+        tempProperty.setStreamName(tempProperty.getStreamName() + streamNameSuffix);
+
         long timeoutMillis = 30_000;
         long retryDelayMillis = 250;
         long startTime = System.currentTimeMillis();
@@ -56,43 +68,41 @@ public class EventStreamConsumer {
             @Override
             public void run() {
                 try {
-                    RStream<String, String> stream = redisson.getStream(streamName, StringCodec.INSTANCE);
-
+                    RStream<String, String> stream = redisson.getStream(tempProperty.getStreamName(), StringCodec.INSTANCE);
                     if (!stream.isExists()) {
-                        stream.createGroupAsync(property.getGroupName(), StreamMessageId.NEWEST);
-                        LOGGER.info("Created by {}.", property);
-                        scheduleRetry();
+                        createGroupAsync(stream);
                         return;
                     }
 
                     boolean isGroupExists = stream.listGroups().stream()
                             .anyMatch(
-                                    group -> group.getName().equals(property.getGroupName())
+                                    group -> group.getName().equals(tempProperty.getGroupName())
                             );
                     if (!isGroupExists) {
-                        stream.createGroupAsync(property.getGroupName(), StreamMessageId.NEWEST);
-                        LOGGER.info("Created by {}.", property);
-                        scheduleRetry();
+                        createGroupAsync(stream);
                         return;
                     }
 
-                    LOGGER.info("Group exists for {}.", property);
+                    LOGGER.info("Group exists for {}.", tempProperty);
                     future.complete(null);
 
                 } catch (Exception e) {
-                    LOGGER.warn("Retrying to create group {} for stream {} due to {}", property.getGroupName(), streamName, e.getMessage());
+                    LOGGER.warn("Retrying to create by {} due to {}", tempProperty, e.getMessage());
                     scheduleRetry();
                 }
             }
 
+            private void createGroupAsync(RStream<String, String> stream) {
+                stream.createGroupAsync(tempProperty.getGroupName(), StreamMessageId.NEWEST);
+                LOGGER.info("Created by {}.", tempProperty);
+                scheduleRetry();
+            }
+
             private void scheduleRetry() {
                 if (System.currentTimeMillis() - startTime > timeoutMillis) {
-                    future.completeExceptionally(new RuntimeException(
-                            "Timeout: Failed to ensure group exists for " + property
-                    ));
+                    future.completeExceptionally(new RuntimeException("Timeout: Failed to ensure group exists for " + tempProperty));
                 } else {
-                    CompletableFuture.delayedExecutor(retryDelayMillis, TimeUnit.MILLISECONDS)
-                            .execute(this);
+                    CompletableFuture.delayedExecutor(retryDelayMillis, TimeUnit.MILLISECONDS).execute(this);
                 }
             }
         };

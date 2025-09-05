@@ -6,7 +6,7 @@ import lombok.EqualsAndHashCode;
 
 @Data
 @EqualsAndHashCode
-@Builder
+@Builder(toBuilder = true)
 public class RedisStreamArgs {
     private String streamName;
     private String groupName;
