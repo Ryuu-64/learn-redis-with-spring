@@ -1,4 +1,4 @@
-package com.example.demo.producer;
+package top.ryuu64.learn.redis.producer;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.connection.stream.RecordId;

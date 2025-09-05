@@ -1,7 +1,7 @@
-package com.example.demo.controller;
+package top.ryuu64.learn.redis.controller;
 
 import org.springframework.web.bind.annotation.*;
-import com.example.demo.producer.RedisStreamProducer;
+import top.ryuu64.learn.redis.producer.RedisStreamProducer;
 
 import java.util.Map;
 
