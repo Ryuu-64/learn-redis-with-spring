@@ -48,7 +48,7 @@ public class EventStreamConsumer {
     private CompletableFuture<Void> ensureGroupExistsAsync(RedisStreamArgs property, String streamNameSuffix) {
         String streamName = property.getStreamName() + streamNameSuffix;
         long timeoutMillis = 30_000;
-        long retryDelayMillis = 500;
+        long retryDelayMillis = 250;
         long startTime = System.currentTimeMillis();
 
         CompletableFuture<Void> future = new CompletableFuture<>();
@@ -59,7 +59,8 @@ public class EventStreamConsumer {
                     RStream<String, String> stream = redisson.getStream(streamName, StringCodec.INSTANCE);
 
                     if (!stream.isExists()) {
-                        createGroup(property, stream);
+                        stream.createGroupAsync(property.getGroupName(), StreamMessageId.NEWEST);
+                        LOGGER.info("Created by {}.", property);
                         scheduleRetry();
                         return;
                     }
@@ -69,7 +70,8 @@ public class EventStreamConsumer {
                                     group -> group.getName().equals(property.getGroupName())
                             );
                     if (!isGroupExists) {
-                        createGroup(property, stream);
+                        stream.createGroupAsync(property.getGroupName(), StreamMessageId.NEWEST);
+                        LOGGER.info("Created by {}.", property);
                         scheduleRetry();
                         return;
                     }
@@ -97,12 +99,6 @@ public class EventStreamConsumer {
 
         attempt.run();
         return future;
-    }
-
-
-    private static void createGroup(RedisStreamArgs property, RStream<String, String> stream) {
-        stream.createGroup(property.getGroupName(), StreamMessageId.NEWEST);
-        LOGGER.info("Created by {}.", property);
     }
 
     private void startConsumerLoop(RedisStreamArgs property) {
