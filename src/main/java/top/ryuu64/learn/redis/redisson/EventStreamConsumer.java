@@ -35,57 +35,74 @@ public class EventStreamConsumer {
         Set<RedisStreamArgs> properties = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (RedisStreamArgs property : properties) {
-            CompletableFuture<Void> future = ensureNormalGroupExists(property);
+            CompletableFuture<Void> future = ensureGroupExistsAsync(property, "");
+            futures.add(future);
+            future = ensureGroupExistsAsync(property, DEAD_LETTER_STREAM_SUFFIX);
             futures.add(future);
         }
-
-        for (RedisStreamArgs property : properties) {
-            CompletableFuture<Void> future = ensureDeadGroupExists(property);
-            futures.add(future);
-        }
-
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .join();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         properties.forEach(this::startConsumerLoop);
+
     }
 
-    private CompletableFuture<Void> ensureNormalGroupExists(RedisStreamArgs property) {
-        return ensureGroupExists(property, "");
-    }
-
-    private CompletableFuture<Void> ensureDeadGroupExists(RedisStreamArgs property) {
-        return ensureGroupExists(property, DEAD_LETTER_STREAM_SUFFIX);
-    }
-
-    private CompletableFuture<Void> ensureGroupExists(RedisStreamArgs property, String streamNameSuffix) {
+    private CompletableFuture<Void> ensureGroupExistsAsync(RedisStreamArgs property, String streamNameSuffix) {
         String streamName = property.getStreamName() + streamNameSuffix;
-        RStream<String, String> stream = redisson.getStream(streamName, StringCodec.INSTANCE);
-        try {
-            if (!stream.isExists()) {
-                // 流不存在时，直接创建组也会创建流
-                return createGroupAsync(property, stream);
+        long timeoutMillis = 30_000;
+        long retryDelayMillis = 500;
+        long startTime = System.currentTimeMillis();
+
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        Runnable attempt = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    RStream<String, String> stream = redisson.getStream(streamName, StringCodec.INSTANCE);
+
+                    if (!stream.isExists()) {
+                        createGroup(property, stream);
+                        scheduleRetry();
+                        return;
+                    }
+
+                    boolean isGroupExists = stream.listGroups().stream()
+                            .anyMatch(
+                                    group -> group.getName().equals(property.getGroupName())
+                            );
+                    if (!isGroupExists) {
+                        createGroup(property, stream);
+                        scheduleRetry();
+                        return;
+                    }
+
+                    LOGGER.info("Group exists for {}.", property);
+                    future.complete(null);
+
+                } catch (Exception e) {
+                    LOGGER.warn("Retrying to create group {} for stream {} due to {}", property.getGroupName(), streamName, e.getMessage());
+                    scheduleRetry();
+                }
             }
 
-            boolean isGroupExists = stream.listGroups()
-                    .stream()
-                    .anyMatch(g -> g.getName().equals(property.getGroupName()));
-            if (!isGroupExists) {
-                return createGroupAsync(property, stream);
+            private void scheduleRetry() {
+                if (System.currentTimeMillis() - startTime > timeoutMillis) {
+                    future.completeExceptionally(new RuntimeException(
+                            "Timeout: Failed to ensure group exists for " + property
+                    ));
+                } else {
+                    CompletableFuture.delayedExecutor(retryDelayMillis, TimeUnit.MILLISECONDS)
+                            .execute(this);
+                }
             }
+        };
 
-            LOGGER.info("Group exists for {}.", property);
-            return CompletableFuture.completedFuture(null);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to check or create stream group. property=" + property, e);
-        }
+        attempt.run();
+        return future;
     }
 
-    private static CompletableFuture<Void> createGroupAsync(RedisStreamArgs property, RStream<String, String> stream) {
-        CompletableFuture<Void> future = stream
-                .createGroupAsync(property.getGroupName(), StreamMessageId.NEWEST)
-                .toCompletableFuture();
+
+    private static void createGroup(RedisStreamArgs property, RStream<String, String> stream) {
+        stream.createGroup(property.getGroupName(), StreamMessageId.NEWEST);
         LOGGER.info("Created by {}.", property);
-        return future;
     }
 
     private void startConsumerLoop(RedisStreamArgs property) {
@@ -171,12 +188,10 @@ public class EventStreamConsumer {
                             LOGGER.error("Failed to claim PEL messages for group {}", property.getGroupName(), claimEx);
                             return;
                         }
+
                         if (claimedMessages != null && !claimedMessages.isEmpty()) {
-                            // 处理并 ack
-                            Map<StreamMessageId, Map<String, String>> updatedMessages = new HashMap<>();
                             for (Map.Entry<StreamMessageId, Map<String, String>> entry : claimedMessages.entrySet()) {
-                                StreamMessageId id = entry.getKey();
-                                Map<String, String> value = new HashMap<>(entry.getValue()); // 复制一份，避免修改原 Map
+                                Map<String, String> value = entry.getValue();
                                 String retryCount = value.get("retryCount");
                                 if (retryCount != null) {
                                     int i = Integer.parseInt(retryCount) + 1;
@@ -185,14 +200,11 @@ public class EventStreamConsumer {
                                     value.put("retryCount", "1");
                                 }
 
-                                // 写回 Redis 覆盖原消息
                                 StreamAddArgs<String, String> args = StreamAddArgs.entries(value);
                                 stream.addAsync(args).toCompletableFuture().join();
-                                updatedMessages.put(id, value); // 保存更新后的 Map
                             }
 
-                            // 处理并 ack
-                            processAndAckMessages(property, stream, updatedMessages, true);
+                            processAndAckMessages(property, stream, claimedMessages, true);
                         }
                     });
         });
@@ -222,11 +234,14 @@ public class EventStreamConsumer {
 
                 Action2Args<StreamMessageId, Map<String, String>> handler = handlerMap.get(property);
                 if (handler != null) {
-                    handler.invoke(msgId, body);
+                    try {
+                        handler.invoke(msgId, body);
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to handle message {} for group {}", msgId, property.getGroupName(), e);
+                    } finally {
+                        stream.ackAsync(property.getGroupName(), msgId);
+                    }
                 }
-
-                stream.ackAsync(property.getGroupName(), msgId);
-
             } catch (Exception e) {
                 LOGGER.error("Failed to process message {} for group {}", msgId, property.getGroupName(), e);
             }
