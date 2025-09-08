@@ -1,9 +1,9 @@
-package top.ryuu64.learn.redis.redisson;
+package top.ryuu64.redis.redisson;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import top.ryuu64.learn.redis.redisson.domain.ConsumerArgs;
+import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 import org.redisson.api.RedissonClient;
 import org.redisson.api.StreamMessageId;
 import org.ryuu.functional.Action2Args;
@@ -25,16 +25,16 @@ public class ConsumerTest {
         consumer.startAsync()
                 .whenComplete((res, throwable) -> {
                     if (throwable != null) {
-                        LOGGER.error("Failed to start EventStreamConsumer", throwable);
+                        LOGGER.error("Failed to start EventStreamConsumer.", throwable);
                     } else {
-                        LOGGER.info("EventStreamConsumer started successfully");
+                        LOGGER.info("EventStreamConsumer started successfully.");
                     }
                 });
         try {
             consumer.stopAsync().get(5, TimeUnit.SECONDS);
-            LOGGER.info("EventStreamConsumer gracefully stopped");
+            LOGGER.info("EventStreamConsumer gracefully stopped.");
         } catch (Exception e) {
-            LOGGER.warn("Some tasks did not complete in time during shutdown", e);
+            LOGGER.warn("Some tasks did not complete in time during shutdown.", e);
         }
     }
 

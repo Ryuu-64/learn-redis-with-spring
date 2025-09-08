@@ -1,4 +1,4 @@
-package top.ryuu64.learn.redis.redisson.domain;
+package top.ryuu64.redis.redisson.domain;
 
 import lombok.Builder;
 import lombok.Data;

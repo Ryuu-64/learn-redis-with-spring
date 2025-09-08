@@ -1,4 +1,4 @@
-package top.ryuu64.learn.redis.serialization;
+package top.ryuu64.redis.serialization;
 
 
 import com.fasterxml.jackson.core.JsonProcessingException;

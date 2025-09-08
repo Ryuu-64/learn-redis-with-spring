@@ -1,4 +1,4 @@
-package top.ryuu64.learn.redis.redisson;
+package top.ryuu64.redis.redisson;
 
 import org.junit.jupiter.api.Test;
 import org.redisson.api.RStream;
@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import top.ryuu64.learn.redis.redisson.domain.ConsumerArgs;
+import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 
 import java.util.HashMap;
 import java.util.Map;

@@ -23,5 +23,5 @@
     </appender>
 
     <logger name="top.ryuu64.learn.redis.redisson.Consumer1Service" level="DEBUG"/>
-    <logger name="top.ryuu64.learn.redis.redisson.StreamConsumer" level="DEBUG"/>
+    <logger name="top.ryuu64.redis.redisson.StreamConsumer" level="DEBUG"/>
 </configuration>

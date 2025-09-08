@@ -1,8 +1,8 @@
-package top.ryuu64.learn.redis.redisson;
+package top.ryuu64.redis.redisson;
 
 import org.redisson.api.stream.StreamCreateGroupArgs;
 import org.redisson.api.stream.StreamReadGroupArgs;
-import top.ryuu64.learn.redis.redisson.domain.ConsumerArgs;
+import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 import org.redisson.api.*;
 import org.redisson.api.stream.StreamAddArgs;
 import org.redisson.client.codec.StringCodec;
@@ -37,17 +37,14 @@ public class StreamConsumer {
         Set<ConsumerArgs> argsList = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (ConsumerArgs args : argsList) {
-            CompletableFuture<Void> future = initializeGroup(args, "");
-            futures.add(future);
-            future = initializeGroup(args, DEAD_LETTER_STREAM_SUFFIX);
-            futures.add(future);
+            futures.add(tryCreateGroup(args, ""));
+            futures.add(tryCreateGroup(args, DEAD_LETTER_STREAM_SUFFIX));
         }
-        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenRun(() -> argsList.forEach(this::startConsumerLoop))
-                .whenCompleteAsync((result, throwable) -> {
-                    if (throwable != null) {
-                        LOGGER.error("Failed to start EventStreamConsumer", throwable);
-                    }
+        return CompletableFuture
+                .allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRunAsync(() -> {
+                    LOGGER.info("All groups initialized, starting consumer loops.");
+                    argsList.forEach(this::startConsumerLoop);
                 });
     }
 
@@ -56,7 +53,7 @@ public class StreamConsumer {
         return CompletableFuture.allOf(consumerTasks.values().toArray(new CompletableFuture[0]));
     }
 
-    private CompletableFuture<Void> initializeGroup(ConsumerArgs args, String streamNameSuffix) {
+    private CompletableFuture<Void> tryCreateGroup(ConsumerArgs args, String streamNameSuffix) {
         ConsumerArgs targetArgs = args.toBuilder().build();
         targetArgs.setStreamName(targetArgs.getStreamName() + streamNameSuffix);
         RStream<String, String> stream = redisson.getStream(targetArgs.getStreamName(), StringCodec.INSTANCE);
@@ -66,31 +63,44 @@ public class StreamConsumer {
                 .makeStream()
                 .entriesRead(0);
         try {
-            RFuture<Void> groupFuture = stream.createGroupAsync(createGroupArgs);
-            groupFuture.toCompletableFuture().get(30, TimeUnit.SECONDS); // 设置超时时间
-            LOGGER.info("Group created successfully for stream: {}", targetArgs.getStreamName());
-            RFuture<Void> consumerFuture = stream.createConsumerAsync(targetArgs.getGroupName(), targetArgs.getConsumerName());
-            consumerFuture.toCompletableFuture().get(10, TimeUnit.SECONDS);
-            LOGGER.info("Consumer created successfully: {}", targetArgs.getConsumerName());
-
-            return CompletableFuture.completedFuture(null);
-
-        } catch (ExecutionException e) {
-            // 捕获执行异常，这通常是Redis服务器返回的错误（如：BUSYGROUP Consumer Group already exists）
-            Throwable rootCause = e.getCause();
-            LOGGER.warn("Creation failed (might be expected, e.g., already exists): {}", rootCause.getMessage());
-            return CompletableFuture.completedFuture(null); // 对于"已存在"这类错误，可以认为是成功的
-        } catch (TimeoutException e) {
-            LOGGER.error("Creation timed out for {}", targetArgs, e);
-            return CompletableFuture.failedFuture(e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            LOGGER.error("Interrupted while ensuring group exists", e);
-            return CompletableFuture.failedFuture(e);
+            return stream
+                    .createGroupAsync(createGroupArgs)
+                    .toCompletableFuture()
+                    .exceptionallyAsync(
+                            throwable -> handleCreateThrowable(throwable, targetArgs)
+                    ).thenCompose(result -> stream
+                            .createConsumerAsync(
+                                    targetArgs.getGroupName(), targetArgs.getConsumerName()
+                            )
+                            .toCompletableFuture()
+                            .exceptionallyAsync(
+                                    throwable -> handleCreateThrowable(throwable, targetArgs)
+                            )
+                    );
         } catch (Exception e) {
             LOGGER.error("Unexpected error during creation for {}", targetArgs, e);
             return CompletableFuture.failedFuture(e);
         }
+    }
+
+    private static Void handleCreateThrowable(Throwable throwable, ConsumerArgs targetArgs) {
+        if (
+                throwable instanceof org.redisson.client.RedisException &&
+                        throwable.getMessage() != null &&
+                        throwable.getMessage().contains("BUSYGROUP Consumer Group name already exists")
+        ) {
+            LOGGER.info(
+                    "Group already exists for args '{}'. This is expected.", targetArgs
+            );
+            return null;
+        }
+
+        LOGGER.error(
+                "Unexpected error during group/consumer creation for stream: {}, group: {}",
+                targetArgs.getStreamName(), targetArgs.getGroupName(),
+                throwable
+        );
+        throw new CompletionException(throwable);
     }
 
     private void startConsumerLoop(ConsumerArgs args) {
