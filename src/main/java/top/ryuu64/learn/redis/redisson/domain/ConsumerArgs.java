@@ -7,7 +7,7 @@ import lombok.EqualsAndHashCode;
 @Data
 @EqualsAndHashCode
 @Builder(toBuilder = true)
-public class RedisStreamArgs {
+public class ConsumerArgs {
     private String streamName;
     private String groupName;
     private String consumerName;

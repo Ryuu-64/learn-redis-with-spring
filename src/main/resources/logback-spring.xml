@@ -22,7 +22,6 @@
         </encoder>
     </appender>
 
-    <logger name="top.ryuu64.learn.redis.service.Consumer1Service" level="DEBUG"/>
-    <!--    <logger name="org.springframework" level="DEBUG"/>-->
-    <!--    <logger name="org.springframework.data.redis" level="DEBUG"/>-->
+    <logger name="top.ryuu64.learn.redis.redisson.Consumer1Service" level="DEBUG"/>
+    <logger name="top.ryuu64.learn.redis.redisson.StreamConsumer" level="DEBUG"/>
 </configuration>
