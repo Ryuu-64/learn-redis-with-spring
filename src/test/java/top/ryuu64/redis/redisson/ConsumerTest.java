@@ -20,7 +20,7 @@ public class ConsumerTest {
     private RedissonClient redisson;
 
     @Test
-    void consumer() {
+    void consumer() throws InterruptedException {
         StreamConsumer consumer = new StreamConsumer(redisson, getHandlers());
         consumer.startAsync()
                 .whenComplete((res, throwable) -> {
@@ -30,6 +30,7 @@ public class ConsumerTest {
                         LOGGER.info("EventStreamConsumer started successfully.");
                     }
                 });
+        Thread.sleep(TimeUnit.SECONDS.toMillis(30));
         try {
             consumer.stopAsync().get(5, TimeUnit.SECONDS);
             LOGGER.info("EventStreamConsumer gracefully stopped.");

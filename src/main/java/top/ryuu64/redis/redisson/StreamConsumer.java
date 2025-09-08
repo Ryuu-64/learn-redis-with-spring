@@ -44,7 +44,7 @@ public class StreamConsumer {
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .thenRunAsync(() -> {
                     LOGGER.info("All groups initialized, starting consumer loops.");
-                    argsList.forEach(this::startConsumerLoop);
+                    argsList.forEach(this::startConsumerLoopAsync);
                 });
     }
 
@@ -103,7 +103,7 @@ public class StreamConsumer {
         throw new CompletionException(throwable);
     }
 
-    private void startConsumerLoop(ConsumerArgs args) {
+    private void startConsumerLoopAsync(ConsumerArgs args) {
         CompletableFuture<?> task = CompletableFuture.runAsync(() -> consumeNextBatch(args));
         consumerTasks.put(args, task);
     }
@@ -166,7 +166,7 @@ public class StreamConsumer {
     ) {
         try {
             if (messages == null || messages.isEmpty()) {
-                LOGGER.warn("No messages found for args {}", args);
+                LOGGER.debug("No messages found for args {}", args);
                 return;
             }
 
