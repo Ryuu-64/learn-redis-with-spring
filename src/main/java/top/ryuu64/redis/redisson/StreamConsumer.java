@@ -37,8 +37,8 @@ public class StreamConsumer {
         Set<ConsumerArgs> argsList = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (ConsumerArgs args : argsList) {
-            futures.add(tryCreateGroup(args, ""));
-            futures.add(tryCreateGroup(args, DEAD_LETTER_STREAM_SUFFIX));
+            futures.add(tryCreateGroupAsync(args, ""));
+            futures.add(tryCreateGroupAsync(args, DEAD_LETTER_STREAM_SUFFIX));
         }
         return CompletableFuture
                 .allOf(futures.toArray(new CompletableFuture[0]))
@@ -53,7 +53,7 @@ public class StreamConsumer {
         return CompletableFuture.allOf(consumerTasks.values().toArray(new CompletableFuture[0]));
     }
 
-    private CompletableFuture<Void> tryCreateGroup(ConsumerArgs args, String streamNameSuffix) {
+    private CompletableFuture<Void> tryCreateGroupAsync(ConsumerArgs args, String streamNameSuffix) {
         ConsumerArgs targetArgs = args.toBuilder().build();
         targetArgs.setStreamName(targetArgs.getStreamName() + streamNameSuffix);
         RStream<String, String> stream = redisson.getStream(targetArgs.getStreamName(), StringCodec.INSTANCE);
