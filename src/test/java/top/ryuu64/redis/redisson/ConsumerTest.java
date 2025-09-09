@@ -3,12 +3,12 @@ package top.ryuu64.redis.redisson;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 import org.redisson.api.RedissonClient;
 import org.redisson.api.StreamMessageId;
 import org.ryuu.functional.Action2Args;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -21,8 +21,8 @@ public class ConsumerTest {
 
     @Test
     void consumer() throws InterruptedException {
-        StreamConsumer consumer = new StreamConsumer(redisson, getHandlers());
-        consumer.startAsync()
+        StreamConsumer consumer = new StreamConsumer(redisson);
+        consumer.startAsync(getHandlers())
                 .whenComplete((res, throwable) -> {
                     if (throwable != null) {
                         LOGGER.error("Failed to start EventStreamConsumer.", throwable);

@@ -2,13 +2,13 @@ package top.ryuu64.redis.redisson;
 
 import org.redisson.api.stream.StreamCreateGroupArgs;
 import org.redisson.api.stream.StreamReadGroupArgs;
-import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 import org.redisson.api.*;
 import org.redisson.api.stream.StreamAddArgs;
 import org.redisson.client.codec.StringCodec;
 import org.ryuu.functional.Action2Args;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import top.ryuu64.redis.redisson.domain.ConsumerArgs;
 
 import java.time.Duration;
 import java.util.*;
@@ -16,41 +16,51 @@ import java.util.concurrent.*;
 
 public class StreamConsumer {
     private static final Logger LOGGER = LoggerFactory.getLogger(StreamConsumer.class);
-    private static final String DEAD_LETTER_STREAM_SUFFIX = ":dead_letter";
-    public static final int READ_AND_PENDING_BATCH_SIZE = 10;
-    public static final long READ_TIMEOUT_MS = 2000;
-    public static final long PEL_IDLE_THRESHOLD_MS = 10_000;
-
     private final RedissonClient redisson;
-    private final Map<ConsumerArgs, CompletableFuture<?>> consumerTasks = new ConcurrentHashMap<>();
-    private volatile boolean isRunning = true;
+    private final String deadLetterSuffix;
+    private final int batchSize;
+    private final long timeout;
+    private final Map<ConsumerArgs, CompletableFuture<?>> futureMap = new ConcurrentHashMap<>();
     private final Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = new ConcurrentHashMap<>();
+    private volatile boolean isRunning = true;
 
-    public StreamConsumer(
-            RedissonClient redisson, Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap
-    ) {
+    public StreamConsumer(RedissonClient redisson) {
         this.redisson = redisson;
-        this.handlerMap.putAll(handlerMap);
+        this.deadLetterSuffix = ":dead_letter";
+        this.batchSize = 50;
+        this.timeout = 2_000;
     }
 
-    public CompletableFuture<Void> startAsync() {
+    public StreamConsumer(
+            RedissonClient redisson, String deadLetterSuffix, int batchSize, long timeout
+    ) {
+        this.redisson = redisson;
+        this.deadLetterSuffix = deadLetterSuffix;
+        this.batchSize = batchSize;
+        this.timeout = timeout;
+    }
+
+    public CompletableFuture<Void> startAsync(
+            Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap
+    ) {
+        this.handlerMap.putAll(handlerMap);
         Set<ConsumerArgs> argsList = handlerMap.keySet();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (ConsumerArgs args : argsList) {
             futures.add(tryCreateGroupAsync(args, ""));
-            futures.add(tryCreateGroupAsync(args, DEAD_LETTER_STREAM_SUFFIX));
+            futures.add(tryCreateGroupAsync(args, deadLetterSuffix));
         }
         return CompletableFuture
                 .allOf(futures.toArray(new CompletableFuture[0]))
                 .thenRunAsync(() -> {
                     LOGGER.info("All groups initialized, starting consumer loops.");
-                    argsList.forEach(this::startConsumerLoopAsync);
+                    argsList.forEach(this::startNextConsumerAsync);
                 });
     }
 
     public CompletableFuture<Void> stopAsync() {
         isRunning = false;
-        return CompletableFuture.allOf(consumerTasks.values().toArray(new CompletableFuture[0]));
+        return CompletableFuture.allOf(futureMap.values().toArray(new CompletableFuture[0]));
     }
 
     private CompletableFuture<Void> tryCreateGroupAsync(ConsumerArgs args, String streamNameSuffix) {
@@ -103,11 +113,6 @@ public class StreamConsumer {
         throw new CompletionException(throwable);
     }
 
-    private void startConsumerLoopAsync(ConsumerArgs args) {
-        CompletableFuture<?> task = CompletableFuture.runAsync(() -> consumeNextBatch(args));
-        consumerTasks.put(args, task);
-    }
-
     /** 消费下一批消息，包括新消息和 PEL 消息重试 */
     private void consumeNextBatch(ConsumerArgs args) {
         if (!isRunning) {
@@ -119,15 +124,27 @@ public class StreamConsumer {
         claimMessages(stream, args);
     }
 
+    private void readMessages(RStream<String, String> stream, ConsumerArgs args) {
+        Map<StreamMessageId, Map<String, String>> groupMessages = stream.readGroup(
+                args.getGroupName(),
+                args.getConsumerName(),
+                StreamReadGroupArgs
+                        .greaterThan(StreamMessageId.NEVER_DELIVERED)
+                        .count(batchSize)
+                        .timeout(Duration.ofMillis(timeout))
+        );
+        handleGroupMessages(args, stream, groupMessages);
+    }
+
     /** 处理 PEL 消息（claim idle 消息并重试） */
     private void claimMessages(RStream<String, String> stream, ConsumerArgs args) {
         stream.pendingRangeAsync(
                 args.getGroupName(),
                 StreamMessageId.MIN,
                 StreamMessageId.MAX,
-                PEL_IDLE_THRESHOLD_MS,
+                timeout,
                 TimeUnit.MILLISECONDS,
-                READ_AND_PENDING_BATCH_SIZE
+                batchSize
         ).whenComplete((pendingMessages, throwable) -> {
             if (throwable != null) {
                 LOGGER.error("Failed to fetch pending messages for args {}", args, throwable);
@@ -138,7 +155,6 @@ public class StreamConsumer {
                 return;
             }
 
-            // 直接移动到死信队列并 ACK
             for (Map.Entry<StreamMessageId, Map<String, String>> entry : pendingMessages.entrySet()) {
                 StreamMessageId msgId = entry.getKey();
                 Map<String, String> body = entry.getValue();
@@ -148,19 +164,7 @@ public class StreamConsumer {
         });
     }
 
-    private void readMessages(RStream<String, String> stream, ConsumerArgs args) {
-        Map<StreamMessageId, Map<String, String>> messages = stream.readGroup(
-                args.getGroupName(),
-                args.getConsumerName(),
-                StreamReadGroupArgs
-                        .greaterThan(StreamMessageId.NEVER_DELIVERED)
-                        .count(READ_AND_PENDING_BATCH_SIZE)
-                        .timeout(Duration.ofMillis(READ_TIMEOUT_MS))
-        );
-        handleBatch(args, stream, messages);
-    }
-
-    private void handleBatch(
+    private void handleGroupMessages(
             ConsumerArgs args, RStream<String, String> stream,
             Map<StreamMessageId, Map<String, String>> messages
     ) {
@@ -175,7 +179,7 @@ public class StreamConsumer {
             LOGGER.error("Error processing messages for group {}", args.getGroupName(), e);
         } finally {
             if (isRunning) {
-                scheduleNextBatch(args);
+                startNextConsumerAsync(args);
             }
         }
     }
@@ -204,26 +208,25 @@ public class StreamConsumer {
         }
     }
 
+    private void startNextConsumerAsync(ConsumerArgs args) {
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> consumeNextBatch(args));
+        futureMap.put(args, future);
+    }
+
     /** 将消息移到死信队列 */
     private void moveToDeadLetter(ConsumerArgs args, StreamMessageId msgId, Map<String, String> body) {
-        String deadLetterStream = args.getStreamName() + DEAD_LETTER_STREAM_SUFFIX;
-        RStream<String, String> deadStream = redisson.getStream(deadLetterStream, StringCodec.INSTANCE);
-
-        // 在消息体里记录原消息信息
         Map<String, String> deadMessage = new HashMap<>(body);
         deadMessage.put("originalStream", args.getStreamName());
         deadMessage.put("originalId", msgId.toString());
+        String deadLetterStream = args.getStreamName() + deadLetterSuffix;
+        RStream<String, String> deadStream = redisson.getStream(deadLetterStream, StringCodec.INSTANCE);
         StreamAddArgs<String, String> addArgs = StreamAddArgs.entries(deadMessage);
+        addArgs.trimNonStrict().maxLen(10_000);
         deadStream.addAsync(addArgs)
                 .exceptionally(ex -> {
                     LOGGER.error("Failed to move message {} to dead letter stream {}", msgId, deadLetterStream, ex);
                     return null;
                 });
-
         LOGGER.warn("Message {} moved to dead letter stream {}", msgId, deadLetterStream);
-    }
-
-    private void scheduleNextBatch(ConsumerArgs args) {
-        CompletableFuture.runAsync(() -> consumeNextBatch(args));
     }
 }

@@ -29,6 +29,8 @@ class DeadLetterTest {
     private RedissonClient redisson;
     @Autowired
     private StringRedisTemplate template;
+    @Autowired
+    private StreamProducer producer;
 
     @Test
     void deadLetter() throws InterruptedException {
@@ -46,8 +48,8 @@ class DeadLetterTest {
                 }
         );
 
-        StreamConsumer consumer = new StreamConsumer(redisson, handlerMap);
-        consumer.startAsync()
+        StreamConsumer consumer = new StreamConsumer(redisson);
+        consumer.startAsync(handlerMap)
                 .whenComplete((res, throwable) -> {
                     if (throwable != null) {
                         LOGGER.error("Failed to start ReliableRedisStreamConsumer", throwable);
@@ -81,7 +83,45 @@ class DeadLetterTest {
             }
             Thread.sleep(100); // 小间隔重试
         }
-        assertFalse(messages.isEmpty(), "死信队列应该有消息");
+        assertFalse(messages == null || messages.isEmpty(), "死信队列应该有消息");
+        try {
+            consumer.stopAsync().get(20, TimeUnit.SECONDS);
+        } catch (ExecutionException | TimeoutException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    void deadLetter2() throws InterruptedException {
+        ConsumerArgs args = ConsumerArgs.builder()
+                .streamName("test-stream")
+                .groupName("test-group")
+                .consumerName("test-consumer")
+                .build();
+
+        Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
+                args,
+                (msgId, msgBody) -> {
+                }
+        );
+
+        StreamConsumer consumer = new StreamConsumer(redisson);
+        consumer.startAsync(handlerMap)
+                .whenComplete((res, throwable) -> {
+                    if (throwable != null) {
+                        LOGGER.error("Failed to start.", throwable);
+                    } else {
+                        LOGGER.info("Started successfully.");
+                    }
+                })
+                .join();
+
+        Map<String, String> messages = new HashMap<>();
+        messages.put("field_name", "field_value");
+        for (int i = 0; i < 10_000; i++) {
+            producer.addAsync(args, messages);
+        }
+
         try {
             consumer.stopAsync().get(20, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException e) {
