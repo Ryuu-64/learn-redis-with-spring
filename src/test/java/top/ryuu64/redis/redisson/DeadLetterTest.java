@@ -11,8 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import top.ryuu64.redis.redisson.domain.ConsumerArgs;
+import top.ryuu64.redis.redisson.mq.MQArgs;
+import top.ryuu64.redis.redisson.mq.StreamConsumer;
+import top.ryuu64.redis.redisson.mq.StreamProducer;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -28,20 +29,18 @@ class DeadLetterTest {
     @Autowired
     private RedissonClient redisson;
     @Autowired
-    private StringRedisTemplate template;
-    @Autowired
     private StreamProducer producer;
 
     @Test
     void deadLetter() throws InterruptedException {
-        ConsumerArgs args = ConsumerArgs.builder()
+        MQArgs args = MQArgs.builder()
                 .streamName("test-stream")
                 .groupName("test-group")
                 .consumerName("test-consumer")
                 .build();
 
         // 1. 定义一个一定会失败的 handler
-        Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
+        Map<MQArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
                 args,
                 (msgId, msgBody) -> {
                     throw new RuntimeException("故意抛异常，模拟处理失败");
@@ -49,7 +48,7 @@ class DeadLetterTest {
         );
 
         StreamConsumer consumer = new StreamConsumer(redisson);
-        consumer.startAsync(handlerMap)
+        consumer.startBatchAsync(handlerMap)
                 .whenComplete((res, throwable) -> {
                     if (throwable != null) {
                         LOGGER.error("Failed to start ReliableRedisStreamConsumer", throwable);
@@ -63,7 +62,7 @@ class DeadLetterTest {
         // 2. 添加一条消息
         Map<String, String> body = new HashMap<>();
         body.put("field_name", "field_value");
-        template.opsForStream().add(args.getStreamName(), body);
+        producer.addAsync(args.getStreamName(), body);
 
         // 3. 检查死信队列
         String streamName = args.getStreamName() + ":dead_letter";
@@ -85,7 +84,7 @@ class DeadLetterTest {
         }
         assertFalse(messages == null || messages.isEmpty(), "死信队列应该有消息");
         try {
-            consumer.stopAsync().get(20, TimeUnit.SECONDS);
+            consumer.stopAllAsync().get(20, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException e) {
             throw new RuntimeException(e);
         }
@@ -93,20 +92,20 @@ class DeadLetterTest {
 
     @Test
     void deadLetter2() throws InterruptedException {
-        ConsumerArgs args = ConsumerArgs.builder()
+        MQArgs args = MQArgs.builder()
                 .streamName("test-stream")
                 .groupName("test-group")
                 .consumerName("test-consumer")
                 .build();
 
-        Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
+        Map<MQArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = Map.of(
                 args,
                 (msgId, msgBody) -> {
                 }
         );
 
         StreamConsumer consumer = new StreamConsumer(redisson);
-        consumer.startAsync(handlerMap)
+        consumer.startBatchAsync(handlerMap)
                 .whenComplete((res, throwable) -> {
                     if (throwable != null) {
                         LOGGER.error("Failed to start.", throwable);
@@ -119,11 +118,11 @@ class DeadLetterTest {
         Map<String, String> messages = new HashMap<>();
         messages.put("field_name", "field_value");
         for (int i = 0; i < 10_000; i++) {
-            producer.addAsync(args, messages);
+            producer.addAsync(args.getStreamName(), messages);
         }
 
         try {
-            consumer.stopAsync().get(20, TimeUnit.SECONDS);
+            consumer.stopAllAsync().get(20, TimeUnit.SECONDS);
         } catch (ExecutionException | TimeoutException e) {
             throw new RuntimeException(e);
         }

@@ -1,5 +1,7 @@
-package top.ryuu64.redis.redisson;
+package top.ryuu64.redis.redisson.mq;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.redisson.api.stream.StreamCreateGroupArgs;
 import org.redisson.api.stream.StreamReadGroupArgs;
 import org.redisson.api.*;
@@ -8,63 +10,86 @@ import org.redisson.client.codec.StringCodec;
 import org.ryuu.functional.Action2Args;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import top.ryuu64.redis.redisson.domain.ConsumerArgs;
+import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+@Component
 public class StreamConsumer {
     private static final Logger LOGGER = LoggerFactory.getLogger(StreamConsumer.class);
     private final RedissonClient redisson;
-    private final String deadLetterSuffix;
-    private final int batchSize;
-    private final long timeout;
-    private final Map<ConsumerArgs, CompletableFuture<?>> futureMap = new ConcurrentHashMap<>();
-    private final Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap = new ConcurrentHashMap<>();
-    private volatile boolean isRunning = true;
+    @Getter
+    @Setter
+    private String deadLetterSuffix = ":dead_letter";
+    @Getter
+    @Setter
+    private int batchSize = 50;
+    @Getter
+    @Setter
+    private long timeout = 2_000;
+    private final Map<MQArgs, ConsumerRunner> consumerMap = new ConcurrentHashMap<>();
 
     public StreamConsumer(RedissonClient redisson) {
         this.redisson = redisson;
-        this.deadLetterSuffix = ":dead_letter";
-        this.batchSize = 50;
-        this.timeout = 2_000;
     }
 
-    public StreamConsumer(
-            RedissonClient redisson, String deadLetterSuffix, int batchSize, long timeout
+    public CompletableFuture<Void> startBatchAsync(
+            Map<MQArgs, Action2Args<StreamMessageId, Map<String, String>>> newHandlers
     ) {
-        this.redisson = redisson;
-        this.deadLetterSuffix = deadLetterSuffix;
-        this.batchSize = batchSize;
-        this.timeout = timeout;
-    }
-
-    public CompletableFuture<Void> startAsync(
-            Map<ConsumerArgs, Action2Args<StreamMessageId, Map<String, String>>> handlerMap
-    ) {
-        this.handlerMap.putAll(handlerMap);
-        Set<ConsumerArgs> argsList = handlerMap.keySet();
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
-        for (ConsumerArgs args : argsList) {
-            futures.add(tryCreateGroupAsync(args, ""));
-            futures.add(tryCreateGroupAsync(args, deadLetterSuffix));
+        List<CompletableFuture<Void>> initFutures = new ArrayList<>();
+        List<ConsumerRunner> consumersToStart = new ArrayList<>();
+        for (MQArgs args : newHandlers.keySet()) {
+            consumerMap.compute(args, (existingArgs, existingRunner) -> {
+                if (existingRunner != null) {
+                    LOGGER.warn("Duplicate key exists for key {}", args);
+                    return existingRunner;
+                } else {
+                    ConsumerRunner runner = ConsumerRunner.builder()
+                            .args(args)
+                            .handler(newHandlers.get(args))
+                            .isRunning(new AtomicBoolean(true))
+                            .build();
+                    consumersToStart.add(runner);
+                    return runner;
+                }
+            });
+            initFutures.add(tryCreateGroupAsync(args, ""));
+            initFutures.add(tryCreateGroupAsync(args, deadLetterSuffix));
         }
-        return CompletableFuture
-                .allOf(futures.toArray(new CompletableFuture[0]))
+        return CompletableFuture.allOf(initFutures.toArray(new CompletableFuture[0]))
                 .thenRunAsync(() -> {
                     LOGGER.info("All groups initialized, starting consumer loops.");
-                    argsList.forEach(this::startNextConsumerAsync);
+                    for (ConsumerRunner runner : consumersToStart) {
+                        runner.startAsync(this::startNextAsync);
+                    }
                 });
     }
 
-    public CompletableFuture<Void> stopAsync() {
-        isRunning = false;
-        return CompletableFuture.allOf(futureMap.values().toArray(new CompletableFuture[0]));
+    public List<CompletableFuture<Void>> stopBatchAsync(List<MQArgs> argsList) {
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (MQArgs args : argsList) {
+            ConsumerRunner ctx = consumerMap.getOrDefault(args, null);
+            CompletableFuture<Void> future = ctx.stopAsync();
+            futures.add(future);
+        }
+        return futures;
     }
 
-    private CompletableFuture<Void> tryCreateGroupAsync(ConsumerArgs args, String streamNameSuffix) {
-        ConsumerArgs targetArgs = args.toBuilder().build();
+    public CompletableFuture<Void> stopAllAsync() {
+        List<CompletableFuture<Void>> stopFutures = new ArrayList<>();
+        consumerMap.values().forEach(runner -> {
+            CompletableFuture<Void> stopFuture = runner.stopAsync();
+            stopFutures.add(stopFuture);
+        });
+
+        return CompletableFuture.allOf(stopFutures.toArray(new CompletableFuture[0]));
+    }
+
+    private CompletableFuture<Void> tryCreateGroupAsync(MQArgs args, String streamNameSuffix) {
+        MQArgs targetArgs = args.toBuilder().build();
         targetArgs.setStreamName(targetArgs.getStreamName() + streamNameSuffix);
         RStream<String, String> stream = redisson.getStream(targetArgs.getStreamName(), StringCodec.INSTANCE);
         StreamCreateGroupArgs createGroupArgs = StreamCreateGroupArgs
@@ -93,7 +118,7 @@ public class StreamConsumer {
         }
     }
 
-    private static Void handleCreateThrowable(Throwable throwable, ConsumerArgs targetArgs) {
+    private static Void handleCreateThrowable(Throwable throwable, MQArgs targetArgs) {
         if (
                 throwable instanceof org.redisson.client.RedisException &&
                         throwable.getMessage() != null &&
@@ -113,18 +138,29 @@ public class StreamConsumer {
         throw new CompletionException(throwable);
     }
 
-    /** 消费下一批消息，包括新消息和 PEL 消息重试 */
-    private void consumeNextBatch(ConsumerArgs args) {
-        if (!isRunning) {
+    private void internalStartNextAsync(MQArgs args) {
+        ConsumerRunner runner = consumerMap.get(args);
+        if (runner == null) {
             return;
         }
 
         RStream<String, String> stream = redisson.getStream(args.getStreamName(), StringCodec.INSTANCE);
         readMessages(stream, args);
         claimMessages(stream, args);
+        startNextAsync(args);
     }
 
-    private void readMessages(RStream<String, String> stream, ConsumerArgs args) {
+    private void startNextAsync(MQArgs args) {
+        ConsumerRunner runner = consumerMap.get(args);
+        if (runner == null) {
+            LOGGER.warn("No consumer for args {}", args);
+            return;
+        }
+
+        runner.startAsync(this::internalStartNextAsync);
+    }
+
+    private void readMessages(RStream<String, String> stream, MQArgs args) {
         Map<StreamMessageId, Map<String, String>> groupMessages = stream.readGroup(
                 args.getGroupName(),
                 args.getConsumerName(),
@@ -137,7 +173,7 @@ public class StreamConsumer {
     }
 
     /** 处理 PEL 消息（claim idle 消息并重试） */
-    private void claimMessages(RStream<String, String> stream, ConsumerArgs args) {
+    private void claimMessages(RStream<String, String> stream, MQArgs args) {
         stream.pendingRangeAsync(
                 args.getGroupName(),
                 StreamMessageId.MIN,
@@ -165,7 +201,7 @@ public class StreamConsumer {
     }
 
     private void handleGroupMessages(
-            ConsumerArgs args, RStream<String, String> stream,
+            MQArgs args, RStream<String, String> stream,
             Map<StreamMessageId, Map<String, String>> messages
     ) {
         try {
@@ -177,28 +213,20 @@ public class StreamConsumer {
             processAndAckMessages(args, stream, messages);
         } catch (Exception e) {
             LOGGER.error("Error processing messages for group {}", args.getGroupName(), e);
-        } finally {
-            if (isRunning) {
-                startNextConsumerAsync(args);
-            }
         }
     }
 
     private void processAndAckMessages(
-            ConsumerArgs args,
+            MQArgs args,
             RStream<String, String> stream,
             Map<StreamMessageId, Map<String, String>> messages
     ) {
         for (Map.Entry<StreamMessageId, Map<String, String>> entry : messages.entrySet()) {
             StreamMessageId msgId = entry.getKey();
             Map<String, String> body = entry.getValue();
-            Action2Args<StreamMessageId, Map<String, String>> handler = handlerMap.get(args);
+            ConsumerRunner runner = consumerMap.getOrDefault(args, null);
             try {
-                if (handler != null) {
-                    handler.invoke(msgId, body);
-                } else {
-                    LOGGER.debug("No handler for args {}", args);
-                }
+                runner.invoke(msgId, body);
             } catch (Exception e) {
                 LOGGER.error("Failed to handle message {}, moving to dead letter", msgId, e);
                 moveToDeadLetter(args, msgId, body);
@@ -208,13 +236,8 @@ public class StreamConsumer {
         }
     }
 
-    private void startNextConsumerAsync(ConsumerArgs args) {
-        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> consumeNextBatch(args));
-        futureMap.put(args, future);
-    }
-
     /** 将消息移到死信队列 */
-    private void moveToDeadLetter(ConsumerArgs args, StreamMessageId msgId, Map<String, String> body) {
+    private void moveToDeadLetter(MQArgs args, StreamMessageId msgId, Map<String, String> body) {
         Map<String, String> deadMessage = new HashMap<>(body);
         deadMessage.put("originalStream", args.getStreamName());
         deadMessage.put("originalId", msgId.toString());
