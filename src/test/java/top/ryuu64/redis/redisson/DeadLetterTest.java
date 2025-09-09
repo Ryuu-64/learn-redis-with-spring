@@ -61,7 +61,7 @@ class DeadLetterTest {
 
         // 2. 添加一条消息
         Map<String, String> body = new HashMap<>();
-        body.put("field_name", "field_value");
+        body.put("field", "value");
         producer.addAsync(args.getStreamName(), body);
 
         // 3. 检查死信队列

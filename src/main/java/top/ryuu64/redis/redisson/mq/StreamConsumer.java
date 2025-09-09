@@ -246,8 +246,8 @@ public class StreamConsumer {
         StreamAddArgs<String, String> addArgs = StreamAddArgs.entries(deadMessage);
         addArgs.trimNonStrict().maxLen(10_000);
         deadStream.addAsync(addArgs)
-                .exceptionally(ex -> {
-                    LOGGER.error("Failed to move message {} to dead letter stream {}", msgId, deadLetterStream, ex);
+                .exceptionally(throwable -> {
+                    LOGGER.error("Failed to move message {} to dead letter stream {}", msgId, deadLetterStream, throwable);
                     return null;
                 });
         LOGGER.warn("Message {} moved to dead letter stream {}", msgId, deadLetterStream);
